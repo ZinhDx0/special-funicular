@@ -19,6 +19,7 @@ class AppPreferences(private val context: Context) {
         private val DARK_MODE = booleanPreferencesKey("dark_mode")
         private val OUTPUT_DIRECTORY = stringPreferencesKey("output_directory")
         private val USE_NNAPI = booleanPreferencesKey("use_nnapi")
+        private val USE_TERMUX = booleanPreferencesKey("use_termux")
     }
 
     val lastSelectedModel: Flow<String> = context.dataStore.data.map { prefs ->
@@ -35,6 +36,10 @@ class AppPreferences(private val context: Context) {
 
     val useNNAPI: Flow<Boolean> = context.dataStore.data.map { prefs ->
         prefs[USE_NNAPI] ?: true
+    }
+
+    val useTermux: Flow<Boolean> = context.dataStore.data.map { prefs ->
+        prefs[USE_TERMUX] ?: false
     }
 
     suspend fun setLastSelectedModel(model: String) {
@@ -58,6 +63,12 @@ class AppPreferences(private val context: Context) {
     suspend fun setUseNNAPI(enabled: Boolean) {
         context.dataStore.edit { prefs ->
             prefs[USE_NNAPI] = enabled
+        }
+    }
+
+    suspend fun setUseTermux(enabled: Boolean) {
+        context.dataStore.edit { prefs ->
+            prefs[USE_TERMUX] = enabled
         }
     }
 }

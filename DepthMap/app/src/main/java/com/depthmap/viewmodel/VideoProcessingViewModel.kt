@@ -10,6 +10,7 @@ import com.depthmap.data.preferences.AppPreferences
 import com.depthmap.data.repository.ModelRepository
 import com.depthmap.data.repository.OutputRepository
 import com.depthmap.domain.DepthEstimator
+import com.depthmap.domain.TermuxBridge
 import com.depthmap.domain.VideoProcessor
 import kotlinx.coroutines.flow.*
 import kotlinx.coroutines.launch
@@ -21,6 +22,7 @@ class VideoProcessingViewModel(application: Application) : AndroidViewModel(appl
     private val preferences = AppPreferences(application)
     private val estimator = DepthEstimator(application)
     private val videoProcessor = VideoProcessor(application)
+    private val termuxBridge = TermuxBridge(application)
 
     val selectedModelId: StateFlow<String> = preferences.lastSelectedModel
         .stateIn(viewModelScope, SharingStarted.Eagerly, "vitb")
@@ -57,14 +59,14 @@ class VideoProcessingViewModel(application: Application) : AndroidViewModel(appl
                 return@launch
             }
 
+            _processingState.value = ProcessingState.Processing(progress = 0f, message = "Processing video...")
+
             val modelFile = modelRepository.getModelFile(model)
             val loadResult = estimator.loadModel(modelFile)
             if (loadResult.isFailure) {
                 _processingState.value = ProcessingState.Error("Failed to load model: ${loadResult.exceptionOrNull()?.message}")
                 return@launch
             }
-
-            _processingState.value = ProcessingState.Processing(progress = 0f, message = "Processing video...")
 
             val outputDir = outputRepository.getOutputDirectory()
             val result = videoProcessor.processVideo(videoUri, outputDir, estimator) { progress ->
@@ -84,6 +86,7 @@ class VideoProcessingViewModel(application: Application) : AndroidViewModel(appl
 
     fun cancelProcessing() {
         videoProcessor.cancel()
+        termuxBridge.cancel()
         _processingState.value = ProcessingState.Cancelled
     }
 

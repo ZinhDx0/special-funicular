@@ -15,8 +15,12 @@ import androidx.compose.ui.unit.dp
 fun SettingsScreen(
     isDarkMode: Boolean,
     useNNAPI: Boolean,
+    useTermux: Boolean,
+    termuxStatus: String?,
+    isTermuxInstalled: Boolean,
     onToggleDarkMode: (Boolean) -> Unit,
     onToggleNNAPI: (Boolean) -> Unit,
+    onToggleTermux: (Boolean) -> Unit,
     onAbout: () -> Unit,
     onBack: () -> Unit,
     modifier: Modifier = Modifier
@@ -141,6 +145,56 @@ fun SettingsScreen(
                     Switch(
                         checked = useNNAPI,
                         onCheckedChange = onToggleNNAPI
+                    )
+                }
+            }
+
+            Card(
+                modifier = Modifier.fillMaxWidth(),
+                colors = CardDefaults.cardColors(
+                    containerColor = MaterialTheme.colorScheme.surfaceVariant
+                )
+            ) {
+                Row(
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .padding(16.dp),
+                    verticalAlignment = Alignment.CenterVertically,
+                    horizontalArrangement = Arrangement.SpaceBetween
+                ) {
+                    Row(verticalAlignment = Alignment.CenterVertically) {
+                        Icon(
+                            imageVector = Icons.Default.Terminal,
+                            contentDescription = null,
+                            tint = if (useTermux && isTermuxInstalled)
+                                MaterialTheme.colorScheme.primary
+                            else
+                                MaterialTheme.colorScheme.onSurfaceVariant
+                        )
+                        Spacer(modifier = Modifier.width(12.dp))
+                        Column(modifier = Modifier.weight(1f)) {
+                            Text(
+                                text = "Use Termux Runtime",
+                                style = MaterialTheme.typography.titleMedium
+                            )
+                            Text(
+                                text = when {
+                                    useTermux && termuxStatus != null -> termuxStatus
+                                    useTermux && !isTermuxInstalled ->
+                                        "Termux not installed. Get it from F-Droid"
+                                    useTermux -> "Requires: pip install onnxruntime pillow numpy"
+                                    else -> "Run inference via Termux (fixes crashes)"
+                                },
+                                style = MaterialTheme.typography.bodySmall,
+                                color = MaterialTheme.colorScheme.onSurfaceVariant,
+                                maxLines = 3
+                            )
+                        }
+                    }
+                    Switch(
+                        checked = useTermux,
+                        onCheckedChange = onToggleTermux,
+                        enabled = isTermuxInstalled
                     )
                 }
             }

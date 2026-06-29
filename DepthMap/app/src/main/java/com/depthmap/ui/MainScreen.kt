@@ -171,11 +171,16 @@ fun MainScreen(
             }
 
             composable(Screen.Settings.route) {
+                val termuxStatus = settingsViewModel.termuxStatus.collectAsState().value
                 SettingsScreen(
                     isDarkMode = isDarkMode,
                     useNNAPI = settingsViewModel.useNNAPI.collectAsState().value,
+                    useTermux = settingsViewModel.useTermux.collectAsState().value,
+                    termuxStatus = termuxStatus?.message,
+                    isTermuxInstalled = settingsViewModel.isTermuxInstalled,
                     onToggleDarkMode = { settingsViewModel.toggleDarkMode(it) },
                     onToggleNNAPI = { settingsViewModel.toggleNNAPI(it) },
+                    onToggleTermux = { settingsViewModel.toggleTermux(it) },
                     onAbout = { navController.navigate(Screen.About.route) },
                     onBack = { navController.popBackStack() }
                 )
