@@ -1,0 +1,12 @@
+# Gradle
+.gradle/
+build/
+*.apk
+*.aab
+
+# IDE
+.idea/
+*.iml
+
+# Python
+ai.py
