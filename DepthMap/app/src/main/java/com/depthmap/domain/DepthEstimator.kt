@@ -11,6 +11,7 @@ import ai.onnxruntime.TensorInfo
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.withContext
 import java.io.File
+import java.nio.ByteBuffer
 import java.nio.FloatBuffer
 
 class DepthEstimator(private val context: Context) {
@@ -94,12 +95,29 @@ class DepthEstimator(private val context: Context) {
             val inputName = session.inputInfo.keys.first()
             val outputName = session.outputInfo.keys.first()
             val inputShape = inputInfo.shape
+            val inputType = inputInfo.type
 
-            Log.d(TAG, "Model input shape: ${inputShape.contentToString()}")
+            Log.d(TAG, "Model input shape: ${inputShape.contentToString()}, type: $inputType")
             Log.d(TAG, "Input name: '$inputName', Output name: '$outputName'")
 
-            val targetW = inputShape[3].toInt()
-            val targetH = inputShape[2].toInt()
+            // Detect NCHW ([1,3,H,W]) vs NHWC ([1,H,W,3]) layout
+            val isNHWC = inputShape.size == 4 && inputShape[3] in 1L..4L && inputShape[1] > 4L
+            val isNCHW = inputShape.size == 4 && inputShape[1] in 1L..4L && inputShape[3] > 4L
+
+            val targetW: Int
+            val targetH: Int
+            if (isNCHW) {
+                targetW = inputShape[3].toInt()
+                targetH = inputShape[2].toInt()
+            } else if (isNHWC) {
+                targetW = inputShape[2].toInt()
+                targetH = inputShape[1].toInt()
+            } else {
+                targetW = inputShape[3].toInt()
+                targetH = inputShape[2].toInt()
+            }
+
+            Log.d(TAG, "Detected layout: ${if (isNHWC) "NHWC" else if (isNCHW) "NCHW" else "unknown"}, target: ${targetW}x${targetH}")
 
             if (targetW <= 0 || targetH <= 0) {
                 val msg = "Invalid model input dimensions: ${targetW}x${targetH}"
@@ -114,27 +132,41 @@ class DepthEstimator(private val context: Context) {
 
             val inputChannels = 3
             val pixelCount = targetW * targetH
-            val floatArray = FloatArray(pixelCount * inputChannels)
             val pixels = IntArray(pixelCount)
             resized.getPixels(pixels, 0, targetW, 0, 0, targetW, targetH)
 
-            for (i in pixels.indices) {
-                val pixel = pixels[i]
-                val r = ((pixel shr 16) and 0xFF) / 255.0f
-                val g = ((pixel shr 8) and 0xFF) / 255.0f
-                val b = (pixel and 0xFF) / 255.0f
-
-                floatArray[i] = (r - mean[0]) / std[0]
-                floatArray[i + pixelCount] = (g - mean[1]) / std[1]
-                floatArray[i + pixelCount * 2] = (b - mean[2]) / std[2]
+            val tensor: OnnxTensor
+            if (isNHWC) {
+                // NHWC format: [1, H, W, 3], typically UINT8
+                val byteBuffer = ByteBuffer.allocate(pixelCount * 3)
+                for (i in pixels.indices) {
+                    val pixel = pixels[i]
+                    byteBuffer.put(((pixel shr 16) and 0xFF).toByte())
+                    byteBuffer.put(((pixel shr 8) and 0xFF).toByte())
+                    byteBuffer.put((pixel and 0xFF).toByte())
+                }
+                byteBuffer.rewind()
+                tensor = OnnxTensor.createTensor(
+                    ortEnvironment, byteBuffer,
+                    longArrayOf(1L, targetH.toLong(), targetW.toLong(), 3L), OnnxJavaType.UINT8
+                )
+            } else {
+                // NCHW format: [1, 3, H, W], FLOAT32 with normalization
+                val floatArray = FloatArray(pixelCount * inputChannels)
+                for (i in pixels.indices) {
+                    val pixel = pixels[i]
+                    val r = ((pixel shr 16) and 0xFF) / 255.0f
+                    val g = ((pixel shr 8) and 0xFF) / 255.0f
+                    val b = (pixel and 0xFF) / 255.0f
+                    floatArray[i] = (r - mean[0]) / std[0]
+                    floatArray[i + pixelCount] = (g - mean[1]) / std[1]
+                    floatArray[i + pixelCount * 2] = (b - mean[2]) / std[2]
+                }
+                tensor = OnnxTensor.createTensor(
+                    ortEnvironment, FloatBuffer.wrap(floatArray),
+                    longArrayOf(1L, 3L, targetH.toLong(), targetW.toLong())
+                )
             }
-
-            Log.d(TAG, "Creating input tensor...")
-            val tensor = OnnxTensor.createTensor(
-                ortEnvironment,
-                FloatBuffer.wrap(floatArray),
-                longArrayOf(1L, 3L, targetH.toLong(), targetW.toLong())
-            )
 
             Log.d(TAG, "Running inference...")
             val results = session.run(mapOf(inputName to tensor))
@@ -159,8 +191,6 @@ class DepthEstimator(private val context: Context) {
 
             val outputTensor = outputValue as OnnxTensor
             val outputInfo = outputTensor.info as TensorInfo
-            val outputBuffer = outputTensor.floatBuffer
-
             val outShape = outputInfo.shape
             Log.d(TAG, "Output shape: ${outShape.contentToString()}")
 
@@ -168,8 +198,15 @@ class DepthEstimator(private val context: Context) {
             val outW: Int
             when (outShape.size) {
                 4 -> {
-                    outH = outShape[2].toInt()
-                    outW = outShape[3].toInt()
+                    if (outShape[1] in 1L..4L && outShape[3] > 4L) {
+                        // NCHW output: [1, 1, H, W]
+                        outH = outShape[2].toInt()
+                        outW = outShape[3].toInt()
+                    } else {
+                        // NHWC output: [1, H, W, 1]
+                        outH = outShape[1].toInt()
+                        outW = outShape[2].toInt()
+                    }
                 }
                 3 -> {
                     outH = outShape[1].toInt()
@@ -196,32 +233,13 @@ class DepthEstimator(private val context: Context) {
             Log.d(TAG, "Output dimensions: ${outW}x${outH}")
 
             val depthArray = FloatArray(outW * outH)
-            outputBuffer.rewind()
-            outputBuffer.get(depthArray)
+            outputTensor.floatBuffer.rewind()
+            outputTensor.floatBuffer.get(depthArray)
 
-            var minVal = Float.MAX_VALUE
-            var maxVal = Float.MIN_VALUE
-            for (v in depthArray) {
-                if (v < minVal) minVal = v
-                if (v > maxVal) maxVal = v
-            }
-            Log.d(TAG, "Depth range: $minVal to $maxVal")
-
-            val range = maxVal - minVal
-            val depthBitmap = Bitmap.createBitmap(outW, outH, Bitmap.Config.ARGB_8888)
-            val depthPixels = IntArray(outW * outH)
-
-            if (range > 1e-6f) {
-                for (i in depthArray.indices) {
-                    val normalized = ((depthArray[i] - minVal) / range * 255.0).toInt().coerceIn(0, 255)
-                    depthPixels[i] = (0xFF shl 24) or (normalized shl 16) or (normalized shl 8) or normalized
-                }
-            } else {
-                android.graphics.Canvas(depthBitmap).drawColor(android.graphics.Color.BLACK)
-            }
-            depthBitmap.setPixels(depthPixels, 0, outW, 0, 0, outW, outH)
+            val depthBitmap = applyInfernoColormap(depthArray, outW, outH)
 
             val scaledDepth = Bitmap.createScaledBitmap(depthBitmap, inputBitmap.width, inputBitmap.height, true)
+            depthBitmap.recycle()
 
             results.close()
             tensor.close()
