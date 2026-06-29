@@ -11,6 +11,7 @@ import kotlinx.coroutines.flow.asStateFlow
 import kotlinx.coroutines.withContext
 import java.io.File
 import java.io.FileOutputStream
+import java.io.IOException
 import java.net.HttpURLConnection
 import java.net.URL
 
@@ -41,6 +42,16 @@ class ModelRepository(private val context: Context) {
 
     fun getTotalStorageUsed(): Long {
         return modelsDir.listFiles()?.sumOf { it.length() } ?: 0
+    }
+
+    fun refreshModels() {
+        _models.value = availableModels.map { model ->
+            model.copy(
+                isDownloaded = isModelDownloaded(model),
+                downloadStatus = if (isModelDownloaded(model)) DownloadStatus.DOWNLOADED else DownloadStatus.NOT_DOWNLOADED,
+                downloadProgress = if (isModelDownloaded(model)) 1f else 0f
+            )
+        }
     }
 
     suspend fun downloadModel(model: DepthModel, onProgress: (Float) -> Unit): Result<Unit> = withContext(Dispatchers.IO) {
@@ -86,7 +97,12 @@ class ModelRepository(private val context: Context) {
             inputStream.close()
             connection.disconnect()
 
-            outputFile.renameTo(modelsDir.resolve("${model.name}.onnx"))
+            // Remove old file if exists, then rename
+            val targetFile = modelsDir.resolve("${model.name}.onnx")
+            if (targetFile.exists()) targetFile.delete()
+            if (!outputFile.renameTo(targetFile)) {
+                throw IOException("Failed to rename downloaded model file")
+            }
 
             val idx = _models.value.indexOfFirst { it.id == model.id }
             if (idx >= 0) {
@@ -101,10 +117,13 @@ class ModelRepository(private val context: Context) {
 
             Result.success(Unit)
         } catch (e: Exception) {
+            // Clean up temp file
+            try { modelsDir.resolve("${model.name}.onnx.tmp").delete() } catch (_: Exception) {}
             val idx = _models.value.indexOfFirst { it.id == model.id }
             if (idx >= 0) {
                 val updated = _models.value.toMutableList()
                 updated[idx] = updated[idx].copy(
+                    isDownloaded = false,
                     downloadStatus = DownloadStatus.ERROR,
                     downloadProgress = 0f
                 )

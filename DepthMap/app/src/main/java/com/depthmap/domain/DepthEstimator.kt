@@ -91,9 +91,15 @@ class DepthEstimator(private val context: Context) {
 
             val depthBitmap = Bitmap.createBitmap(outW, outH, Bitmap.Config.ARGB_8888)
             val depthPixels = IntArray(outW * outH)
-            for (i in depthArray.indices) {
-                val normalized = ((depthArray[i] - minVal) / range * 255.0).toInt().coerceIn(0, 255)
-                depthPixels[i] = (0xFF shl 24) or (normalized shl 16) or (normalized shl 8) or normalized
+            if (range > 0.001f) {
+                for (i in depthArray.indices) {
+                    val normalized = ((depthArray[i] - minVal) / range * 255.0).toInt().coerceIn(0, 255)
+                    depthPixels[i] = (0xFF shl 24) or (normalized shl 16) or (normalized shl 8) or normalized
+                }
+            } else {
+                for (i in depthArray.indices) {
+                    depthPixels[i] = (0xFF shl 24)
+                }
             }
             depthBitmap.setPixels(depthPixels, 0, outW, 0, 0, outW, outH)
 

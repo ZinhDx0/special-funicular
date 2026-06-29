@@ -31,8 +31,11 @@ class ModelManagerViewModel(application: Application) : AndroidViewModel(applica
 
     fun downloadModel(model: DepthModel) {
         viewModelScope.launch {
-            modelRepository.downloadModel(model) { progress ->
-                models.value
+            val result = modelRepository.downloadModel(model) { progress ->
+                // Repository updates _models StateFlow directly
+            }
+            if (result.isFailure) {
+                android.util.Log.e("ModelManager", "Download failed", result.exceptionOrNull())
             }
         }
     }
@@ -40,6 +43,12 @@ class ModelManagerViewModel(application: Application) : AndroidViewModel(applica
     fun deleteModel(model: DepthModel) {
         viewModelScope.launch {
             modelRepository.deleteModel(model)
+        }
+    }
+
+    fun refreshModels() {
+        viewModelScope.launch {
+            modelRepository.refreshModels()
         }
     }
 }

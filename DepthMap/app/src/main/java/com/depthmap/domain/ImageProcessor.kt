@@ -24,6 +24,9 @@ class ImageProcessor(private val context: Context) {
                 ?: return@withContext Result.failure(Exception("Cannot open image"))
             val inputBitmap = BitmapFactory.decodeStream(inputStream)
             inputStream.close()
+            if (inputBitmap == null) {
+                return@withContext Result.failure(Exception("Failed to decode image"))
+            }
 
             val timestamp = SimpleDateFormat("yyyyMMdd_HHmmss", Locale.US).format(Date())
             val outputFile = File(outputDir, "depthmap_${timestamp}.png")

@@ -104,6 +104,9 @@ fun MainScreen(
             }
 
             composable(Screen.Models.route) {
+                LaunchedEffect(Unit) {
+                    modelManagerViewModel.refreshModels()
+                }
                 ModelManagerScreen(
                     models = modelManagerViewModel.models.collectAsState().value,
                     selectedModelId = modelManagerViewModel.selectedModelId.collectAsState().value,
