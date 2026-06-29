@@ -2,6 +2,7 @@ package com.depthmap.domain
 
 import android.content.Context
 import android.graphics.Bitmap
+import android.util.Log
 import ai.onnxruntime.OnnxTensor
 import ai.onnxruntime.OnnxJavaType
 import ai.onnxruntime.OrtEnvironment
@@ -14,21 +15,65 @@ import java.nio.FloatBuffer
 
 class DepthEstimator(private val context: Context) {
 
+    companion object {
+        private const val TAG = "DepthEstimator"
+    }
+
     private val ortEnvironment: OrtEnvironment = OrtEnvironment.getEnvironment()
     private var ortSession: OrtSession? = null
 
     private val mean = floatArrayOf(0.485f, 0.456f, 0.406f)
     private val std = floatArrayOf(0.229f, 0.224f, 0.225f)
 
+    private var cachedInputSize: Pair<Int, Int>? = null
+
     suspend fun loadModel(modelFile: File): Result<Unit> = withContext(Dispatchers.IO) {
         try {
+            Log.d(TAG, "loadModel: ${modelFile.absolutePath}")
+
+            if (!modelFile.exists()) {
+                val msg = "Model file not found: ${modelFile.absolutePath}"
+                Log.e(TAG, msg)
+                return@withContext Result.failure(Exception(msg))
+            }
+
+            val fileSize = modelFile.length()
+            Log.d(TAG, "Model file size: $fileSize bytes (${fileSize / (1024*1024)} MB)")
+
+            if (fileSize < 1000) {
+                val msg = "Model file too small (corrupt?): $fileSize bytes"
+                Log.e(TAG, msg)
+                return@withContext Result.failure(Exception(msg))
+            }
+
             ortSession?.close()
             ortSession = null
+            cachedInputSize = null
+
             val sessionOptions = OrtSession.SessionOptions()
             sessionOptions.setIntraOpNumThreads(4)
+            sessionOptions.setOptimizationLevel(OrtSession.SessionOptions.OptLevel.BASIC_OPT)
+
+            Log.d(TAG, "Creating ONNX session...")
             ortSession = ortEnvironment.createSession(modelFile.absolutePath, sessionOptions)
+            Log.d(TAG, "ONNX session created successfully")
+
+            val inputNames = ortSession!!.inputInfo.keys
+            val outputNames = ortSession!!.outputInfo.keys
+            Log.d(TAG, "Inputs: $inputNames, Outputs: $outputNames")
+
+            for ((name, info) in ortSession!!.inputInfo) {
+                val tensorInfo = info.info as? TensorInfo
+                Log.d(TAG, "Input '$name': shape=${tensorInfo?.shape?.contentToString()}, type=${tensorInfo?.type}")
+            }
+            for ((name, info) in ortSession!!.outputInfo) {
+                val tensorInfo = info.info as? TensorInfo
+                Log.d(TAG, "Output '$name': shape=${tensorInfo?.shape?.contentToString()}, type=${tensorInfo?.type}")
+            }
+
             Result.success(Unit)
         } catch (e: Exception) {
+            Log.e(TAG, "Failed to load model: ${e.message}", e)
             Result.failure(e)
         }
     }
@@ -37,21 +82,40 @@ class DepthEstimator(private val context: Context) {
 
     suspend fun estimateDepth(inputBitmap: Bitmap): Result<Bitmap> = withContext(Dispatchers.IO) {
         try {
-            val session = ortSession ?: return@withContext Result.failure(Exception("Model not loaded"))
+            val session = ortSession
+            if (session == null) {
+                Log.e(TAG, "estimateDepth: Model not loaded")
+                return@withContext Result.failure(Exception("Model not loaded"))
+            }
+
+            Log.d(TAG, "estimateDepth: input bitmap ${inputBitmap.width}x${inputBitmap.height}")
 
             val inputInfo = session.inputInfo.values.first().info as TensorInfo
             val inputName = session.inputInfo.keys.first()
             val outputName = session.outputInfo.keys.first()
-
             val inputShape = inputInfo.shape
-            val targetW = inputShape[2].toInt()
-            val targetH = inputShape[3].toInt()
 
+            Log.d(TAG, "Model input shape: ${inputShape.contentToString()}")
+            Log.d(TAG, "Input name: '$inputName', Output name: '$outputName'")
+
+            val targetW = inputShape[3].toInt()
+            val targetH = inputShape[2].toInt()
+
+            if (targetW <= 0 || targetH <= 0) {
+                val msg = "Invalid model input dimensions: ${targetW}x${targetH}"
+                Log.e(TAG, msg)
+                return@withContext Result.failure(Exception(msg))
+            }
+
+            cachedInputSize = Pair(targetW, targetH)
+
+            Log.d(TAG, "Resizing input to ${targetW}x${targetH}")
             val resized = Bitmap.createScaledBitmap(inputBitmap, targetW, targetH, true)
 
             val inputChannels = 3
-            val floatArray = FloatArray(targetW * targetH * inputChannels)
-            val pixels = IntArray(targetW * targetH)
+            val pixelCount = targetW * targetH
+            val floatArray = FloatArray(pixelCount * inputChannels)
+            val pixels = IntArray(pixelCount)
             resized.getPixels(pixels, 0, targetW, 0, 0, targetW, targetH)
 
             for (i in pixels.indices) {
@@ -61,21 +125,75 @@ class DepthEstimator(private val context: Context) {
                 val b = (pixel and 0xFF) / 255.0f
 
                 floatArray[i] = (r - mean[0]) / std[0]
-                floatArray[i + targetW * targetH] = (g - mean[1]) / std[1]
-                floatArray[i + targetW * targetH * 2] = (b - mean[2]) / std[2]
+                floatArray[i + pixelCount] = (g - mean[1]) / std[1]
+                floatArray[i + pixelCount * 2] = (b - mean[2]) / std[2]
             }
 
-            val tensor = OnnxTensor.createTensor(ortEnvironment, FloatBuffer.wrap(floatArray), longArrayOf(1L, 3L, targetH.toLong(), targetW.toLong()))
+            Log.d(TAG, "Creating input tensor...")
+            val tensor = OnnxTensor.createTensor(
+                ortEnvironment,
+                FloatBuffer.wrap(floatArray),
+                longArrayOf(1L, 3L, targetH.toLong(), targetW.toLong())
+            )
 
+            Log.d(TAG, "Running inference...")
             val results = session.run(mapOf(inputName to tensor))
-            val outputValue = results.get(outputName)
-                .orElseThrow { Exception("No output tensor for: $outputName") }
+
+            val outputOptional = results.get(outputName)
+            if (!outputOptional.isPresent) {
+                results.close()
+                tensor.close()
+                val msg = "No output tensor for: $outputName"
+                Log.e(TAG, msg)
+                return@withContext Result.failure(Exception(msg))
+            }
+
+            val outputValue = outputOptional.get()
+            if (outputValue !is OnnxTensor) {
+                results.close()
+                tensor.close()
+                val msg = "Output is not OnnxTensor: ${outputValue.javaClass.name}"
+                Log.e(TAG, msg)
+                return@withContext Result.failure(Exception(msg))
+            }
+
             val outputTensor = outputValue as OnnxTensor
             val outputInfo = outputTensor.info as TensorInfo
             val outputBuffer = outputTensor.floatBuffer
 
-            val outH = outputInfo.shape[2].toInt()
-            val outW = outputInfo.shape[3].toInt()
+            val outShape = outputInfo.shape
+            Log.d(TAG, "Output shape: ${outShape.contentToString()}")
+
+            val outH: Int
+            val outW: Int
+            when (outShape.size) {
+                4 -> {
+                    outH = outShape[2].toInt()
+                    outW = outShape[3].toInt()
+                }
+                3 -> {
+                    outH = outShape[1].toInt()
+                    outW = outShape[2].toInt()
+                }
+                2 -> {
+                    outH = outShape[0].toInt()
+                    outW = outShape[1].toInt()
+                }
+                1 -> {
+                    val side = Math.sqrt(outShape[0].toDouble()).toInt()
+                    outH = side
+                    outW = side
+                }
+                else -> {
+                    results.close()
+                    tensor.close()
+                    val msg = "Unexpected output shape rank: ${outShape.size}"
+                    Log.e(TAG, msg)
+                    return@withContext Result.failure(Exception(msg))
+                }
+            }
+
+            Log.d(TAG, "Output dimensions: ${outW}x${outH}")
 
             val depthArray = FloatArray(outW * outH)
             outputBuffer.rewind()
@@ -87,19 +205,19 @@ class DepthEstimator(private val context: Context) {
                 if (v < minVal) minVal = v
                 if (v > maxVal) maxVal = v
             }
-            val range = maxVal - minVal
+            Log.d(TAG, "Depth range: $minVal to $maxVal")
 
+            val range = maxVal - minVal
             val depthBitmap = Bitmap.createBitmap(outW, outH, Bitmap.Config.ARGB_8888)
             val depthPixels = IntArray(outW * outH)
-            if (range > 0.001f) {
+
+            if (range > 1e-6f) {
                 for (i in depthArray.indices) {
                     val normalized = ((depthArray[i] - minVal) / range * 255.0).toInt().coerceIn(0, 255)
                     depthPixels[i] = (0xFF shl 24) or (normalized shl 16) or (normalized shl 8) or normalized
                 }
             } else {
-                for (i in depthArray.indices) {
-                    depthPixels[i] = (0xFF shl 24)
-                }
+                android.graphics.Canvas(depthBitmap).drawColor(android.graphics.Color.BLACK)
             }
             depthBitmap.setPixels(depthPixels, 0, outW, 0, 0, outW, outH)
 
@@ -108,13 +226,51 @@ class DepthEstimator(private val context: Context) {
             results.close()
             tensor.close()
 
+            Log.d(TAG, "Depth estimation completed successfully")
             Result.success(scaledDepth)
+        } catch (e: ai.onnxruntime.OrtException) {
+            Log.e(TAG, "ONNX Runtime error: ${e.message}", e)
+            Result.failure(Exception("ONNX error: ${e.message}"))
+        } catch (e: OutOfMemoryError) {
+            Log.e(TAG, "Out of memory during inference", e)
+            Result.failure(Exception("Out of memory. Try a smaller model."))
+        } catch (e: Exception) {
+            Log.e(TAG, "Depth estimation failed: ${e.message}", e)
+            Result.failure(e)
+        }
+    }
+
+    suspend fun verifyModel(modelFile: File): Result<String> = withContext(Dispatchers.IO) {
+        try {
+            if (!modelFile.exists()) {
+                return@withContext Result.failure(Exception("File not found"))
+            }
+
+            val tempSession = ortEnvironment.createSession(modelFile.absolutePath)
+            val inputInfo = tempSession.inputInfo
+            val outputInfo = tempSession.outputInfo
+            val sb = StringBuilder()
+            sb.appendLine("Inputs:")
+            for ((name, value) in inputInfo) {
+                val ti = value.info as? TensorInfo
+                sb.appendLine("  $name: shape=${ti?.shape?.contentToString()}, type=${ti?.type}")
+            }
+            sb.appendLine("Outputs:")
+            for ((name, value) in outputInfo) {
+                val ti = value.info as? TensorInfo
+                sb.appendLine("  $name: shape=${ti?.shape?.contentToString()}, type=${ti?.type}")
+            }
+            tempSession.close()
+            Result.success(sb.toString())
         } catch (e: Exception) {
             Result.failure(e)
         }
     }
 
+    fun getCachedInputSize(): Pair<Int, Int>? = cachedInputSize
+
     fun close() {
+        Log.d(TAG, "Closing session")
         ortSession?.close()
         ortSession = null
     }
